@@ -2,8 +2,10 @@ package fsync
 
 import (
 	"bytes"
+	"fmt"
 	"io/ioutil"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -222,4 +224,51 @@ func getModTime(name string) time.Time {
 	info, err := os.Stat(name)
 	check(err)
 	return info.ModTime()
+}
+
+func BenchmarkSync(b *testing.B) {
+	createTempDir := func() string {
+		tempDir, err := ioutil.TempDir(os.TempDir(), "fsync_test")
+		check(err)
+		return tempDir
+	}
+
+	tempDir := createTempDir()
+
+	createSomeFiles := func(dirname string) {
+		for i := 0; i < 5; i++ {
+			f, err := os.Create(filepath.Join(tempDir, dirname, fmt.Sprintf("test%d.txt", i)))
+			if err != nil {
+				b.Fatal(err)
+			}
+			f.Close()
+		}
+	}
+
+	depth := 5
+	for level := depth; level > 0; level-- {
+		dirname := ""
+		for i := 0; i < level; i++ {
+			dirname = filepath.Join(dirname, fmt.Sprintf("dir%d", i))
+			err := os.MkdirAll(filepath.Join(tempDir, dirname), 0755)
+			if err != nil && !os.IsExist(err) {
+				b.Fatal(err)
+			}
+		}
+		createSomeFiles(dirname)
+	}
+
+	src := tempDir
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		dst := createTempDir()
+		s := NewSyncer()
+		check(s.SyncTo(dst, filepath.Join(src, "dir0")))
+		b.StopTimer()
+		check(os.RemoveAll(src))
+		src = dst
+		b.StartTimer()
+
+	}
+
 }
