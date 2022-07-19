@@ -78,8 +78,7 @@ type Syncer struct {
 	NoChmod bool
 	// Implement this function to skip Chmod syncing for only certain files
 	// or directories. Return true to skip Chmod.
-	// Note that src may be either os.FileInfo or fs.DirEntry depending on the file system.
-	ChmodFilter func(dst, src FileInfo) bool
+	ChmodFilter func(dst, src os.FileInfo) bool
 
 	// TODO add options for not checking content for equality
 
@@ -160,7 +159,7 @@ func (s *Syncer) sync(dst, src string) {
 		if dstat != nil && dstat.IsDir() {
 			check(s.DestFs.RemoveAll(dst))
 		}
-		if !s.equal(dst, src) {
+		if !s.equal(dst, src, dstat, sstat) {
 			// perform copy
 			df, err := s.DestFs.Create(dst)
 			check(err)
@@ -253,18 +252,13 @@ func (s *Syncer) syncstats(dst, src string) {
 }
 
 // equal returns true if both dst and src files are equal
-func (s *Syncer) equal(dst, src string) bool {
-	// get file infos
-	info1, err1 := s.DestFs.Stat(dst)
-	info2, err2 := s.SrcFs.Stat(src)
-	if os.IsNotExist(err1) || os.IsNotExist(err2) {
+func (s *Syncer) equal(dst, src string, dstat, sstat os.FileInfo) bool {
+	if sstat == nil || dstat == nil {
 		return false
 	}
-	check(err1)
-	check(err2)
 
 	// check sizes
-	if info1.Size() != info2.Size() {
+	if dstat.Size() != sstat.Size() {
 		return false
 	}
 
@@ -330,7 +324,7 @@ func (s *Syncer) checkDir(dst, src string) (b bool, err error) {
 		return true
 	})
 
-	return isNonEmpty, nil
+	return isNonEmpty, err
 }
 
 func withDirEntry(fs afero.Fs, path string, fn func(FileInfo) bool) error {
