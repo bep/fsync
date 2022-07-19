@@ -33,6 +33,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	iofs "io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -44,6 +45,12 @@ var (
 	ErrFileOverDir = errors.New(
 		"fsync: trying to overwrite a non-empty directory with a file")
 )
+
+// FileInfo contains the shared methods between os.FileInfo and fs.DirEntry.
+type FileInfo interface {
+	Name() string
+	IsDir() bool
+}
 
 // Sync copies files and directories inside src into dst.
 func Sync(dst, src string) error {
@@ -62,7 +69,8 @@ type Syncer struct {
 	Delete bool
 	// To allow certain files to remain in the destination, implement this function.
 	// Return true to skip file, false to delete.
-	DeleteFilter func(f os.FileInfo) bool
+	// Note that src may be either os.FileInfo or fs.DirEntry depending on the file system.
+	DeleteFilter func(f FileInfo) bool
 	// By default, modification times are synced. This can be turned off by
 	// setting this to true.
 	NoTimes bool
@@ -70,7 +78,8 @@ type Syncer struct {
 	NoChmod bool
 	// Implement this function to skip Chmod syncing for only certain files
 	// or directories. Return true to skip Chmod.
-	ChmodFilter func(dst, src os.FileInfo) bool
+	// Note that src may be either os.FileInfo or fs.DirEntry depending on the file system.
+	ChmodFilter func(dst, src FileInfo) bool
 
 	// TODO add options for not checking content for equality
 
@@ -81,7 +90,7 @@ type Syncer struct {
 // NewSyncer creates a new instance of Syncer with default options.
 func NewSyncer() *Syncer {
 	s := Syncer{SrcFs: new(afero.OsFs), DestFs: new(afero.OsFs)}
-	s.DeleteFilter = func(f os.FileInfo) bool {
+	s.DeleteFilter = func(f FileInfo) bool {
 		return false
 	}
 	return &s
@@ -182,31 +191,33 @@ func (s *Syncer) sync(dst, src string) {
 		check(s.DestFs.MkdirAll(dst, 0755)) // permissions will be synced later
 	}
 
-	// go through sf files and sync them
-	files, err := afero.ReadDir(s.SrcFs, src)
+	// make a map of filenames for quick lookup; used in deletion
+	// deletion below
+	m := make(map[string]bool)
+	err = withDirEntry(s.SrcFs, src, func(fi FileInfo) bool {
+		dst2 := filepath.Join(dst, fi.Name())
+		src2 := filepath.Join(src, fi.Name())
+		s.sync(dst2, src2)
+		m[fi.Name()] = true
+
+		return false
+	})
+
 	if os.IsNotExist(err) {
 		return
 	}
 	check(err)
-	// make a map of filenames for quick lookup; used in deletion
-	// deletion below
-	m := make(map[string]bool, len(files))
-	for _, file := range files {
-		dst2 := filepath.Join(dst, file.Name())
-		src2 := filepath.Join(src, file.Name())
-		s.sync(dst2, src2)
-		m[file.Name()] = true
-	}
 
 	// delete files from dst that does not exist in src
 	if s.Delete {
-		files, err = afero.ReadDir(s.DestFs, dst)
-		check(err)
-		for _, file := range files {
-			if !m[file.Name()] && !s.DeleteFilter(file) {
-				check(s.DestFs.RemoveAll(filepath.Join(dst, file.Name())))
+		err = withDirEntry(s.DestFs, dst, func(fi FileInfo) bool {
+			if !m[fi.Name()] && !s.DeleteFilter(fi) {
+				check(s.DestFs.RemoveAll(filepath.Join(dst, fi.Name())))
 			}
-		}
+			return false
+		})
+		check(err)
+
 	}
 }
 
@@ -313,15 +324,47 @@ func (s *Syncer) checkDir(dst, src string) (b bool, err error) {
 	// dst is a directory and src is a file
 	// check if dst is non-empty
 	// read dst directory
+	var isNonEmpty bool
+	err = withDirEntry(s.DestFs, dst, func(FileInfo) bool {
+		isNonEmpty = true
+		return true
+	})
 
-	files, err := afero.ReadDir(s.DestFs, dst)
+	return isNonEmpty, nil
+}
+
+func withDirEntry(fs afero.Fs, path string, fn func(FileInfo) bool) error {
+	f, err := fs.Open(path)
 	if err != nil {
-		return false, err
+		return err
 	}
-	if len(files) > 0 {
-		return true, nil
+	defer f.Close()
+
+	if rdf, ok := f.(iofs.ReadDirFile); ok {
+		fis, err := rdf.ReadDir(-1)
+		if err != nil {
+			return err
+		}
+		for _, fi := range fis {
+			if fn(fi) {
+				return nil
+			}
+		}
+		return nil
 	}
-	return false, nil
+
+	fis, err := f.Readdir(-1)
+	if err != nil {
+		return err
+	}
+
+	for _, fi := range fis {
+		if fn(fi) {
+			return nil
+		}
+	}
+
+	return nil
 }
 
 func check(err error) {
