@@ -112,7 +112,7 @@ func TestDeleteFileFilter(t *testing.T) {
 	s := NewSyncer()
 	s.Delete = true
 
-	s.DeleteFilter = func(f os.FileInfo) bool {
+	s.DeleteFilter = func(f FileInfo) bool {
 		return f.Name() == "d"
 	}
 
